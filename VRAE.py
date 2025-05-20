@@ -57,7 +57,9 @@ except ImportError:
 # Data utilities
 # -----------------------------------------------------------
 
-USED_PITCHES = [p for p in range(21, 108) if p not in range(21, 108-39)]  # keep 49 dims as论文所述
+# Keep 49 pitches as described in the paper. MIDI notes range from 21 to 107
+# (inclusive) here so we drop the lowest 38 notes and keep the remaining 49.
+USED_PITCHES = [p for p in range(21, 108) if p not in range(21, 59)]
 
 class MidiDataset(Dataset):
     """Convert MIDI files to fixed‑length binary piano‑roll windows."""
