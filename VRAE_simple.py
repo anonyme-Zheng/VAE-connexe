@@ -19,30 +19,60 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-class VRAE(nn.Module):
-    """A very small Variational Recurrent Auto‑Encoder."""
+class Encoder(nn.Module):
+    """Encoder module returning ``mu`` and ``logvar`` for a sequence."""
 
-    def __init__(self, input_dim: int, hidden_dim: int = 32, latent_dim: int = 16,
+    def __init__(self, input_dim: int, hidden_dim: int, latent_dim: int,
                  rnn_type: str = "gru") -> None:
         super().__init__()
         rnn_cls = nn.GRU if rnn_type.lower() == "gru" else nn.LSTM
-        self.enc_rnn = rnn_cls(input_dim, hidden_dim, batch_first=True)
+        self.rnn = rnn_cls(input_dim, hidden_dim, batch_first=True)
         self.fc_mu = nn.Linear(hidden_dim, latent_dim)
         self.fc_logvar = nn.Linear(hidden_dim, latent_dim)
-
-        self.fc_z2h = nn.Linear(latent_dim, hidden_dim)
-        self.dec_rnn = rnn_cls(input_dim, hidden_dim, batch_first=True)
-        self.out = nn.Linear(hidden_dim, input_dim)
         self.rnn_type = rnn_type.lower()
 
-    def encode(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        _, h = self.enc_rnn(x)
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        _, h = self.rnn(x)
         if self.rnn_type == "lstm":
             h = h[0]
         h = h.squeeze(0)
         mu = self.fc_mu(h)
         logvar = self.fc_logvar(h)
         return mu, logvar
+
+class Decoder(nn.Module):
+    """Decoder module reconstructing a sequence from ``z``."""
+
+    def __init__(self, input_dim: int, hidden_dim: int, latent_dim: int,
+                 rnn_type: str = "gru") -> None:
+        super().__init__()
+        rnn_cls = nn.GRU if rnn_type.lower() == "gru" else nn.LSTM
+        self.fc_z2h = nn.Linear(latent_dim, hidden_dim)
+        self.rnn = rnn_cls(input_dim, hidden_dim, batch_first=True)
+        self.out = nn.Linear(hidden_dim, input_dim)
+        self.rnn_type = rnn_type.lower()
+
+    def forward(self, z: torch.Tensor, seq_len: int) -> torch.Tensor:
+        h0 = torch.tanh(self.fc_z2h(z)).unsqueeze(0)
+        if self.rnn_type == "lstm":
+            h0 = (h0, torch.zeros_like(h0))
+        dec_in = torch.zeros(z.size(0), seq_len, self.out.out_features,
+                            device=z.device)
+        out, _ = self.rnn(dec_in, h0)
+        return self.out(out)
+
+
+class VRAE(nn.Module):
+    """A very small Variational Recurrent Auto‑Encoder."""
+
+    def __init__(self, input_dim: int, hidden_dim: int = 32, latent_dim: int = 16,
+                 rnn_type: str = "gru") -> None:
+        super().__init__()
+        self.encoder = Encoder(input_dim, hidden_dim, latent_dim, rnn_type)
+        self.decoder = Decoder(input_dim, hidden_dim, latent_dim, rnn_type)
+
+    def encode(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        return self.encoder(x)
 
     @staticmethod
     def reparameterize(mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
@@ -51,12 +81,7 @@ class VRAE(nn.Module):
         return mu + eps * std
 
     def decode(self, z: torch.Tensor, seq_len: int) -> torch.Tensor:
-        h0 = torch.tanh(self.fc_z2h(z)).unsqueeze(0)
-        if self.rnn_type == "lstm":
-            h0 = (h0, torch.zeros_like(h0))
-        dec_in = torch.zeros(z.size(0), seq_len, self.out.out_features, device=z.device)
-        out, _ = self.dec_rnn(dec_in, h0)
-        return self.out(out)
+        return self.decoder(z, seq_len)
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         mu, logvar = self.encode(x)
