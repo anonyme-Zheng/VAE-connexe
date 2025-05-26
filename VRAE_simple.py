@@ -1,14 +1,3 @@
-"""Minimal example of a Variational Recurrent Auto-Encoder (VRAE).
-
-This module implements a very small VRAE that can be trained on generic
-time‑series data.  It intentionally avoids the MIDI specific utilities in
-``VRAE.py`` so that it can be used with e.g. financial sequences.
-
-Running the module will train the model on random data if no CSV file is
-provided.  A CSV file should contain one sequence per row.  After training, the
-script prints the reconstruction of the first sequence.
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -22,14 +11,20 @@ import torch.nn.functional as F
 class Encoder(nn.Module):
     """Encoder module returning ``mu`` and ``logvar`` for a sequence."""
 
-    def __init__(self, input_dim: int, hidden_dim: int, latent_dim: int,
-                 rnn_type: str = "gru") -> None:
+    def __init__(self, input_dim: int, hidden_dim: int, latent_dim: int, rnn_type: str = "rnn") -> None:
         super().__init__()
-        rnn_cls = nn.GRU if rnn_type.lower() == "gru" else nn.LSTM
+        self.rnn_type = rnn_type.lower()
+        if rnn_type.lower() == "gru":
+            rnn_cls = nn.GRU
+        elif rnn_type.lower() == "lstm":
+            rnn_cls = nn.LSTM
+        else:
+            rnn_cls = nn.RNN
+
         self.rnn = rnn_cls(input_dim, hidden_dim, batch_first=True)
         self.fc_mu = nn.Linear(hidden_dim, latent_dim)
         self.fc_logvar = nn.Linear(hidden_dim, latent_dim)
-        self.rnn_type = rnn_type.lower()
+
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         _, h = self.rnn(x)
@@ -43,23 +38,48 @@ class Encoder(nn.Module):
 class Decoder(nn.Module):
     """Decoder module reconstructing a sequence from ``z``."""
 
-    def __init__(self, input_dim: int, hidden_dim: int, latent_dim: int,
-                 rnn_type: str = "gru") -> None:
+    def __init__(self, input_dim: int, hidden_dim: int, latent_dim: int, rnn_type: str = "rnn") -> None:
         super().__init__()
-        rnn_cls = nn.GRU if rnn_type.lower() == "gru" else nn.LSTM
-        self.fc_z2h = nn.Linear(latent_dim, hidden_dim)
-        self.rnn = rnn_cls(input_dim, hidden_dim, batch_first=True)
-        self.out = nn.Linear(hidden_dim, input_dim)
         self.rnn_type = rnn_type.lower()
+        self.fc_z2h = nn.Linear(latent_dim, hidden_dim)
 
-    def forward(self, z: torch.Tensor, seq_len: int) -> torch.Tensor:
-        h0 = torch.tanh(self.fc_z2h(z)).unsqueeze(0)
+        if self.rnn_type == "gru":
+            self.cell = nn.GRUCell(input_dim, hidden_dim)
+        elif self.rnn_type == "lstm":
+            self.cell = nn.LSTMCell(input_dim, hidden_dim)
+        else:
+            self.cell = nn.RNNCell(input_dim, hidden_dim)
+
+        self.fc_out = nn.Linear(hidden_dim, input_dim)
+
+
+    def forward(self, z: torch.Tensor, seq_len: int, target: torch.Tensor) -> torch.Tensor:
+
+        batch = z.size(0)
+        # 1) 从 z 初始化 h (和 c)
+        h = torch.tanh(self.fc_z2h(z))            # (batch, hidden_dim)
         if self.rnn_type == "lstm":
-            h0 = (h0, torch.zeros_like(h0))
-        dec_in = torch.zeros(z.size(0), seq_len, self.out.out_features,
-                            device=z.device)
-        out, _ = self.rnn(dec_in, h0)
-        return self.out(out)
+            c = torch.zeros_like(h)               # LSTM 还需要 cell-state
+
+        # 2) 自回归地生成 seq_len 步
+        outputs= []
+
+        for t in range(seq_len):
+
+            x_in = target[:, t, :]
+
+            if self.rnn_type == "lstm":
+                h, c = self.cell(x_in, (h, c))     # LSTMCell
+            else:
+                h = self.cell(x_in, h)             # RNNCell / GRUCell
+
+            # 由 h -> xₜ
+            x_t = torch.sigmoid(self.fc_out(h))  # 根据数据分布可换激活
+            outputs.append(x_t)
+
+        # (seq_len 个 (batch, input_dim)) → (batch, seq_len, input_dim)
+        return torch.stack(outputs, dim=1)
+
 
 
 class VRAE(nn.Module):
@@ -80,13 +100,13 @@ class VRAE(nn.Module):
         eps = torch.randn_like(std)
         return mu + eps * std
 
-    def decode(self, z: torch.Tensor, seq_len: int) -> torch.Tensor:
-        return self.decoder(z, seq_len)
+    def decode(self, z: torch.Tensor, seq_len: int, target: torch.Tensor) -> torch.Tensor:
+        return self.decoder(z, seq_len, target)
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         mu, logvar = self.encode(x)
         z = self.reparameterize(mu, logvar)
-        recon = self.decode(z, x.size(1))
+        recon = self.decode(z, x.size(1), target=x)
         return recon, mu, logvar
 
     @staticmethod
@@ -100,43 +120,12 @@ def train(model: VRAE, data: torch.Tensor, epochs: int = 10, lr: float = 1e-3) -
     """Trains ``model`` on the provided tensor of shape ``[N, T, D]``."""
 
     optim = torch.optim.Adam(model.parameters(), lr=lr)
-    for _ in range(epochs):
+    for epoch in range(epochs):
         recon, mu, logvar = model(data)
         loss = model.loss(recon, data, mu, logvar)
         optim.zero_grad()
         loss.backward()
         optim.step()
 
-
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Run a simple VRAE example")
-    parser.add_argument("--csv", help="CSV file with sequences (rows)")
-    parser.add_argument("--epochs", type=int, default=10)
-    args = parser.parse_args()
-
-    if args.csv:
-        # Load CSV using Python's builtin csv module to avoid numpy dependency
-        import csv
-
-        sequences = []
-        with open(args.csv, "r", newline="") as f:
-            reader = csv.reader(f)
-            for row in reader:
-                seq = [float(x) for x in row]
-                sequences.append(seq)
-        data = torch.tensor(sequences, dtype=torch.float32).unsqueeze(-1)
-    else:
-        # Random data as a stand‑in for financial series
-        data = torch.randn(64, 30, 1)
-
-    model = VRAE(input_dim=data.size(-1))
-    train(model, data, epochs=args.epochs)
-
-    with torch.no_grad():
-        recon, _, _ = model(data[:1])
-    print("Reconstruction of the first sequence:\n", recon.squeeze().tolist())
-
-
-if __name__ == "__main__":
-    main()
-
+        if epoch % 1 == 0:  # 想隔几轮打一次就改这里
+            print(f"Epoch {epoch:3d}/{epochs}  |  loss = {loss.item():.4f}")
