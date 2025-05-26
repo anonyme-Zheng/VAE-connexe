@@ -1,3 +1,10 @@
+from __future__ import annotations
+import math
+from typing import Sequence
+import torch
+from torch import nn, Tensor
+from torch.nn import functional as F
+
 class Encoder(nn.Module):
     """Simple MLP encoder producing factorised Gaussian params."""
     def __init__(self, input_dim: int, latent_dim: int, hidden_dims: Sequence[int] = (400,)):
