@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import argparse
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Callable
 
 import torch
 import torch.nn as nn
@@ -53,6 +53,8 @@ class Decoder(nn.Module):
 
         self.fc_out = nn.Linear(hidden_dim, input_dim)
 
+        self.start_token = nn.Parameter(torch.randn(1, input_dim))
+
     def _apply_activation(self, x: torch.Tensor) -> torch.Tensor:
         if self.output_activation == "sigmoid":
             return torch.sigmoid(x)
@@ -78,7 +80,7 @@ class Decoder(nn.Module):
         if target is not None and teacher_forcing_ratio > 0:
             x_in = target[:, 0, :]  # Use first timestep from target
         else:
-            x_in = torch.zeros(batch, input_dim, device=z.device)
+            x_in = self.start_token.expand(batch, -1)
             
         for t in range(seq_len):
             if self.rnn_type == "lstm":
