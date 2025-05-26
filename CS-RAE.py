@@ -33,14 +33,69 @@ class Decoder(nn.Module):
         return logits  # use Bernoulli over each pixel
 
 
+# -----------------------------------------------------------------------------
+# GMM Prior p(z)
+# -----------------------------------------------------------------------------
+
+class GMMPrior(nn.Module):
+    """Learnable isotropic Gaussian mixture prior with equal weights."""
+    def __init__(self, K: int, latent_dim: int):
+        super().__init__()
+        self.K = K
+        self.latent_dim = latent_dim
+        self.mu = nn.Parameter(torch.randn(K, latent_dim) * 0.05)
+        self.logvar = nn.Parameter(torch.zeros(K, latent_dim))  # log σ²_k
+
+    @property
+    def var(self) -> Tensor:
+        return self.logvar.exp()
+
+    def forward(self) -> tuple[Tensor, Tensor]:
+        return self.mu, self.var
 
 
 
+# -----------------------------------------------------------------------------
+# Cauchy–Schwarz divergence (closed form) between q = N(μ_q, σ_q² I) and GMM prior
+# -----------------------------------------------------------------------------
+
+def gaussian_overlap(mu1: Tensor, var1: Tensor, mu2: Tensor, var2: Tensor) -> Tensor:
+    """Computes 𝓝(μ1 | μ2, Σ1 + Σ2) for diagonal covariances (isotropic per dim)."""
+    diff2 = (mu1 - mu2).pow(2).sum(dim=-1)
+    var_sum = var1 + var2  # shape K or latent_dim broadcast
+    log_det = var_sum.log().sum(dim=-1)
+    log_norm_const = -0.5 * (mu1.size(-1) * math.log(2 * math.pi) + log_det)
+    log_prob = log_norm_const - 0.5 * diff2 / var_sum.sum(dim=-1)
+    return log_prob.exp()  # scalar density
 
 
+def cs_divergence_gmm(mu_q: Tensor, var_q: Tensor, mu_p: Tensor, var_p: Tensor) -> Tensor:
+    """Compute D_CS(q||p) closed‑form for diagonal Gaussians vs equally‑weighted GMM.
 
+    Args:
+        mu_q: (B, D)
+        var_q: (B, D)
+        mu_p: (K, D)
+        var_p: (K, D)
+    Returns
+        d_cs: (B,) value for each sample
+    """
+    K = mu_p.size(0)
+    # term1 = ∑_k w_k N(μ_q | μ_k, σ_q² + σ_k²)
+    # equal weights w_k = 1/K
+    overlap_qp = gaussian_overlap(mu_q.unsqueeze(1), var_q.unsqueeze(1), mu_p, var_p)  # (B, K)
+    term1 = overlap_qp.mean(dim=1)  # (B,)
+    # term2 = ∑_{k,k'} w_k w_{k'} N(μ_k | μ_{k'}, 2σ_k²)
+    overlap_pp = gaussian_overlap(mu_p.unsqueeze(1), var_p.unsqueeze(1), mu_p, var_p * 2)  # (K, K)
+    term2 = overlap_pp.mean()  # scalar
+    # term3 = N(μ_q | μ_q, 2σ_q²) = (2π)^{-D/2} |2σ_q² I|^{-1/2}
+    term3 = (1.0 / (math.sqrt(4*math.pi)**mu_q.size(-1) * var_q.prod(dim=-1).sqrt()))
+    # Assemble D_CS = -log term1 + 0.5 log term2 + 0.5 log term3
+    return (-term1.log() + 0.5 * math.log(term2) + 0.5 * term3.log()).clamp(min=0)
 
-
+# -----------------------------------------------------------------------------
+# Mixture‑CSRAE model wrapper
+# -----------------------------------------------------------------------------
 class MixtureCSRAE(nn.Module):
     def __init__(self,
                  input_dim: int,
