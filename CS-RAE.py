@@ -73,28 +73,37 @@ def gaussian_overlap(mu1: Tensor, var1: Tensor, mu2: Tensor, var2: Tensor) -> Te
 
 
 def cs_divergence_gmm(mu_q: Tensor, var_q: Tensor, mu_p: Tensor, var_p: Tensor) -> Tensor:
-    """Compute D_CS(q||p) closed‑form for diagonal Gaussians vs equally‑weighted GMM.
-
-    Args:
-        mu_q: (B, D)
-        var_q: (B, D)
-        mu_p: (K, D)
-        var_p: (K, D)
-    Returns
-        d_cs: (B,) value for each sample
-    """
+    """Compute D_CS(q||p) for Gaussian q vs GMM p with equal weights."""
     K = mu_p.size(0)
-    # term1 = ∑_k w_k N(μ_q | μ_k, σ_q² + σ_k²)
-    # equal weights w_k = 1/K
-    overlap_qp = gaussian_overlap(mu_q.unsqueeze(1), var_q.unsqueeze(1), mu_p, var_p)  # (B, K)
+    D = mu_q.size(-1)
+    
+    # Term 1: ∫ q(z)p(z)dz = 1/K ∑_k N(μ_q | μ_k, σ_q² + σ_k²)
+    overlap_qp = gaussian_overlap(
+        mu_q.unsqueeze(1), var_q.unsqueeze(1), 
+        mu_p.unsqueeze(0), var_p.unsqueeze(0)
+    )  # (B, K)
     term1 = overlap_qp.mean(dim=1)  # (B,)
-    # term2 = ∑_{k,k'} w_k w_{k'} N(μ_k | μ_{k'}, 2σ_k²)
-    overlap_pp = gaussian_overlap(mu_p.unsqueeze(1), var_p.unsqueeze(1), mu_p, var_p * 2)  # (K, K)
-    term2 = overlap_pp.mean()  # scalar
-    # term3 = N(μ_q | μ_q, 2σ_q²) = (2π)^{-D/2} |2σ_q² I|^{-1/2}
-    term3 = (1.0 / (math.sqrt(4*math.pi)**mu_q.size(-1) * var_q.prod(dim=-1).sqrt()))
-    # Assemble D_CS = -log term1 + 0.5 log term2 + 0.5 log term3
-    return (-term1.log() + 0.5 * math.log(term2) + 0.5 * term3.log()).clamp(min=0)
+    
+    # Term 2: ∫ p(z)²dz = 1/K² ∑_{k,k'} N(μ_k | μ_k', 2σ_k'²)
+    # 注意：根据论文，这里应该是 2σ_k'²
+    overlap_pp = []
+    for k in range(K):
+        for k_prime in range(K):
+            overlap = gaussian_overlap(
+                mu_p[k:k+1], torch.zeros_like(var_p[k:k+1]),
+                mu_p[k_prime:k_prime+1], 2 * var_p[k_prime:k_prime+1]
+            )
+            overlap_pp.append(overlap)
+    term2 = torch.stack(overlap_pp).mean()
+    
+    # Term 3: ∫ q(z)²dz = N(μ_q | μ_q, 2σ_q²)
+    log_term3 = -0.5 * D * math.log(2 * math.pi) - 0.5 * (2 * var_q).log().sum(dim=-1)
+    term3 = log_term3.exp()  # (B,)
+    
+    # D_CS = -log(term1) + 0.5*log(term2) + 0.5*log(term3)
+    cs_div = -term1.log() + 0.5 * term2.log() + 0.5 * term3.log()
+    
+    return cs_div.clamp(min=0)
 
 # -----------------------------------------------------------------------------
 # Mixture‑CSRAE model wrapper
