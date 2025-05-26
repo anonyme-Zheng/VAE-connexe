@@ -61,12 +61,15 @@ class GMMPrior(nn.Module):
 
 def gaussian_overlap(mu1: Tensor, var1: Tensor, mu2: Tensor, var2: Tensor) -> Tensor:
     """Computes 𝓝(μ1 | μ2, Σ1 + Σ2) for diagonal covariances (isotropic per dim)."""
-    diff2 = (mu1 - mu2).pow(2).sum(dim=-1)
-    var_sum = var1 + var2  # shape K or latent_dim broadcast
-    log_det = var_sum.log().sum(dim=-1)
-    log_norm_const = -0.5 * (mu1.size(-1) * math.log(2 * math.pi) + log_det)
-    log_prob = log_norm_const - 0.5 * diff2 / var_sum.sum(dim=-1)
-    return log_prob.exp()  # scalar density
+    var_sum = var1 + var2
+    diff = mu1 - mu2
+    
+    # 在对数空间计算以提高数值稳定性
+    D = mu1.size(-1)
+    log_norm = -0.5 * D * math.log(2 * math.pi) - 0.5 * var_sum.log().sum(dim=-1)
+    log_exp = -0.5 * (diff.pow(2) / var_sum).sum(dim=-1)
+    
+    return (log_norm + log_exp).exp()
 
 
 def cs_divergence_gmm(mu_q: Tensor, var_q: Tensor, mu_p: Tensor, var_p: Tensor) -> Tensor:
