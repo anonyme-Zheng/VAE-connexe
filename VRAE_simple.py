@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import argparse
-from typing import Tuple
+from typing import Tuple, Optional
 
 import torch
 import torch.nn as nn
@@ -158,7 +158,7 @@ def train(model: VRAE, data: torch.Tensor, epochs: int = 10, lr: float = 1e-3, b
         recon, mu, logvar = model(data, teacher_forcing_ratio=tf_ratio)  # 修改：传入teacher_forcing_ratio
         total_loss, rec_loss, kld_loss = model.loss(recon, data, mu, logvar, beta)
         optim.zero_grad()
-        loss.backward()
+        total_loss.backward()
         optim.step()
 
         if epoch % 10 == 0:  
