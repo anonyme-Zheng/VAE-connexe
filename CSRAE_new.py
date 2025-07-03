@@ -146,5 +146,5 @@ class MixtureCSRAE(nn.Module):
         # CS divergence
         mu_p, var_p = self.prior()
         cs_loss = cs_divergence_gmm(mu_q, logvar_q.exp(), mu_p, var_p).mean()
-        total_loss = recon_loss - self.lambda_cs * cs_loss
+        total_loss = recon_loss + self.lambda_cs * cs_loss
         return total_loss, recon_loss, cs_loss
